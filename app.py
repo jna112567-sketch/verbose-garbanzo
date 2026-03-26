@@ -7,15 +7,6 @@ import plotly.express as px
 import xml.etree.ElementTree as ET
 import requests
 import requests_cache
-import time
-from datetime import timedelta
-
-# --- INSTALL REQUESTS CACHE FOR YFINANCE WITH PROPER SESSION ---
-session = requests.Session()
-session.headers.update({
-    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
-})
-requests_cache.install_cache('yfinance_cache', backend='memory', expire_after=timedelta(hours=1))
 
 st.set_page_config(page_title="Pro Terminal", layout="wide")
 st.title("🏛️ Professional Equity Terminal")
@@ -107,57 +98,6 @@ def get_sentiment_rss(ticker):
         else: return "Neutral ⚪"
     except: return "Neutral ⚪"
 
-# --- CACHED TICKER INFO FUNCTION TO PREVENT RATE LIMITS ---
-@st.cache_data(ttl=3600)
-def get_ticker_info(ticker):
-    """Fetch ticker info with caching and error handling"""
-    try:
-        time.sleep(0.5)  # Small delay to prevent rate limiting
-        return yf.Ticker(ticker, session=session).info
-    except Exception as e:
-        st.warning(f"⚠️ Could not fetch info for {ticker}: {type(e).__name__}")
-        return {}
-
-# --- CACHED FINANCIAL STATEMENTS FUNCTIONS ---
-@st.cache_data(ttl=3600)
-def get_ticker_financials(ticker):
-    """Fetch income statement with caching"""
-    try:
-        time.sleep(0.5)
-        return yf.Ticker(ticker, session=session).financials
-    except Exception as e:
-        st.warning(f"⚠️ Could not fetch financials for {ticker}")
-        return pd.DataFrame()
-
-@st.cache_data(ttl=3600)
-def get_ticker_balancesheet(ticker):
-    """Fetch balance sheet with caching"""
-    try:
-        time.sleep(0.5)
-        return yf.Ticker(ticker, session=session).balance_sheet
-    except Exception as e:
-        st.warning(f"⚠️ Could not fetch balance sheet for {ticker}")
-        return pd.DataFrame()
-
-@st.cache_data(ttl=3600)
-def get_ticker_cashflow(ticker):
-    """Fetch cash flow with caching"""
-    try:
-        time.sleep(0.5)
-        return yf.Ticker(ticker, session=session).cashflow
-    except Exception as e:
-        st.warning(f"⚠️ Could not fetch cash flow for {ticker}")
-        return pd.DataFrame()
-
-@st.cache_data(ttl=3600)
-def get_institutional_holders(ticker):
-    """Fetch institutional holders with caching"""
-    try:
-        time.sleep(0.5)
-        return yf.Ticker(ticker, session=session).institutional_holders
-    except Exception as e:
-        return None
-
 def get_full_news_rss(ticker):
     try:
         url = f"https://feeds.finance.yahoo.com/rss/2.0/headline?s={ticker}&region=US&lang=en-US"
@@ -208,76 +148,25 @@ FINANCIAL_TERMS = {
     "Free Cash Flow": "Cash generated after supporting operations and maintaining capital assets. \n\n*Healthy Range: High positive numbers indicate safety and room for dividends.*"
 }
 
-# --- NEW: Data Caching Function with Robust Rate Limit Protection ---
-@st.cache_data(ttl=3600)
+# --- NEW: Data Caching Function ---
+@st.cache_data(ttl=3600)  # High TTL is CRITICAL to stop hitting Yahoo
 def fetch_ticker_data(symbols_tuple, time_period):
-    """Fetch ticker data with per-ticker delays and exponential backoff"""
     try:
-        symbols_list = list(symbols_tuple)
-        downloaded_data = {}
-        max_retries = 3
-        base_delay = 1.5  # seconds between tickers
+        # yfinance 1.2.0+ handles the session automatically
+        df = yf.download(
+            tickers=list(symbols_tuple), 
+            period=time_period, 
+            progress=False,
+            group_by='column'
+        )
         
-        progress_placeholder = st.empty()
-        
-        for idx, ticker in enumerate(symbols_list):
-            progress_placeholder.info(f"📥 Downloading {ticker}... ({idx+1}/{len(symbols_list)})")
-            
-            retry_count = 0
-            while retry_count < max_retries:
-                try:
-                    # Download individual ticker with delay
-                    df = yf.download(
-                        ticker, 
-                        period=time_period, 
-                        progress=False,
-                        session=session
-                    )
-                    
-                    if df.empty:
-                        raise ValueError(f"No data returned for {ticker}")
-                    
-                    downloaded_data[ticker] = df['Close']
-                    
-                    # Add delay after successful download to throttle requests
-                    time.sleep(base_delay)
-                    break
-                    
-                except Exception as e:
-                    error_msg = str(e).lower()
-                    
-                    # Check for rate limit errors
-                    if any(keyword in error_msg for keyword in ['rate limit', 'too many requests', 'yfratilimiterror']):
-                        retry_count += 1
-                        if retry_count < max_retries:
-                            wait_time = (2 ** retry_count) + np.random.uniform(0, 1)  # exponential backoff + jitter
-                            progress_placeholder.warning(
-                                f"⏱️ Rate limited on {ticker}. Waiting {wait_time:.1f}s before retry "
-                                f"({retry_count}/{max_retries})..."
-                            )
-                            time.sleep(wait_time)
-                        else:
-                            progress_placeholder.error(
-                                f"❌ Could not fetch {ticker} after {max_retries} retries. "
-                                f"Yahoo Finance rate limit exceeded. Please wait 15-30 minutes."
-                            )
-                            return None
-                    else:
-                        # Different type of error
-                        progress_placeholder.error(f"❌ Error fetching {ticker}: {e}")
-                        return None
-        
-        progress_placeholder.success(f"✅ Downloaded {len(downloaded_data)}/{len(symbols_list)} tickers")
-        
-        if not downloaded_data:
+        if df.empty:
+            st.error("Yahoo returned no data. You might be rate-limited.")
             return None
-        
-        # Combine all downloaded data
-        result_df = pd.DataFrame(downloaded_data)
-        return result_df
-        
+            
+        return df['Close'] if len(symbols_tuple) > 1 else df
     except Exception as e:
-        st.error(f"❌ Fatal error in data fetch: {e}")
+        st.error(f"Connection Error: {e}")
         return None
 
 # CRITICAL FIX for line 163 (The Pandas Warning)
@@ -401,7 +290,8 @@ if tickers:
 
             for t in tab2_tickers:
                 with st.container(border=True):
-                    info = get_ticker_info(t)
+                    t_obj = yf.Ticker(t)
+                    info = t_obj.info
                     quote_type = info.get('quoteType', 'EQUITY')
                     
                     st.markdown(f"### {info.get('shortName', t)} ({t})")
@@ -480,7 +370,7 @@ if tickers:
                         with col_own:
                             st.write("**Top Institutional Holders**")
                             try:
-                                holders = get_institutional_holders(t)
+                                holders = t_obj.institutional_holders
                                 if holders is not None and not holders.empty:
                                     holders_clean = holders[['Holder', 'Shares', 'Value']].head(5)
                                     holders_clean['Shares'] = holders_clean['Shares'].apply(lambda x: f"{x:,.0f}")
@@ -591,10 +481,9 @@ if tickers:
             fin_col1, fin_col2 = st.columns([2, 1])
             with fin_col1:
                 fin_ticker = st.selectbox("Select Asset to View Financials:", tickers, key="tab4_ticks")
-                fin_info = get_ticker_info(fin_ticker)
+                fin_obj = yf.Ticker(fin_ticker)
                 
-                statement_type = "Income Statement"  # Default
-                if fin_info.get('quoteType') == 'ETF':
+                if fin_obj.info.get('quoteType') == 'ETF':
                     st.warning(f"{fin_ticker} is an ETF. ETFs do not have traditional corporate financial statements.")
                 else:
                     statement_type = st.radio("Select Statement", ["Income Statement", "Balance Sheet", "Cash Flow"], horizontal=True)
@@ -605,13 +494,8 @@ if tickers:
                 if lookup_term != "--- Select a Term ---":
                     st.info(FINANCIAL_TERMS[lookup_term])
 
-            if fin_info.get('quoteType') != 'ETF':
-                if statement_type == "Income Statement":
-                    df_fin = get_ticker_financials(fin_ticker)
-                elif statement_type == "Balance Sheet":
-                    df_fin = get_ticker_balancesheet(fin_ticker)
-                else:
-                    df_fin = get_ticker_cashflow(fin_ticker)
+            if fin_obj.info.get('quoteType') != 'ETF':
+                df_fin = fin_obj.financials if statement_type == "Income Statement" else fin_obj.balance_sheet if statement_type == "Balance Sheet" else fin_obj.cashflow
                 
                 if not df_fin.empty:
                     df_fin = df_fin.dropna(how='all')
@@ -698,31 +582,10 @@ else:
     # --- SIDEBAR HEALTH CHECK ---
 with st.sidebar:
     st.divider()
-    st.subheader("⚙️ System Status")
-    
-    cache_info = st.empty()
-    status_info = st.empty()
-    
     try:
         # A lightweight test call to check connectivity
-        test_info = get_ticker_info("AAPL")
-        if test_info:
-            status_info.markdown("● **API Status:** <span style='color:green'>✓ Online</span>", unsafe_allow_html=True)
-        else:
-            raise Exception("No data returned")
-        
-        # Show cache info
-        if requests_cache.get_cache():
-            cache_size = len(requests_cache.get_cache().responses)
-            cache_info.info(f"📦 **Cache:** {cache_size} entries (1-hour expiry)")
-        
-    except Exception as e:
-        status_info.markdown("● **API Status:** <span style='color:red'>⚠ Rate Limited</span>", unsafe_allow_html=True)
-        status_info.warning(
-            "🔄 **Yahoo Finance is throttling requests.**\n\n"
-            "✅ **What to do:**\n"
-            "• Wait 15-30 minutes and refresh\n"
-            "• App will use cached data if available\n"
-            "• Avoid rapidly refreshing the page\n\n"
-            "💡 **Why this happens:** Yahoo limits free API access to prevent abuse."
-        )
+        test_data = yf.Ticker("AAPL").fast_info['lastPrice']
+        st.sidebar.markdown("● **API Status:** <span style='color:green'>Online</span>", unsafe_allow_html=True)
+    except Exception:
+        st.sidebar.markdown("● **API Status:** <span style='color:red'>Rate Limited</span>", unsafe_allow_html=True)
+        st.sidebar.warning("Yahoo is throttling this IP. Please wait 15-30 mins.")
