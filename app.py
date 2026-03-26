@@ -6,6 +6,7 @@ import plotly.graph_objects as go
 import plotly.express as px
 import xml.etree.ElementTree as ET
 import requests
+import requests_cache
 
 st.set_page_config(page_title="Pro Terminal", layout="wide")
 st.title("🏛️ Professional Equity Terminal")
@@ -148,11 +149,23 @@ FINANCIAL_TERMS = {
 }
 
 # --- NEW: Data Caching Function ---
-@st.cache_data(ttl=3600)  # Keeps data in memory for 1 hour
+@st.cache_data(ttl=3600)
 def fetch_ticker_data(symbols_tuple, time_period):
-    """Fetch data with caching to prevent YFRateLimitError."""
-    # Symbols must be a tuple for Streamlit's cache to 'hash' them
-    df = yf.download(list(symbols_tuple), period=time_period)['Close']
+    """
+    Fetch data allowing yf to manage its own curl_cffi session.
+    Using list(symbols_tuple) as yf.download expects a list or string.
+    """
+    # Simply call download without passing a manual session object
+    df = yf.download(
+        tickers=list(symbols_tuple), 
+        period=time_period, 
+        progress=False,
+        group_by='column'
+    )
+    
+    # Logic to handle MultiIndex columns vs Single Ticker Series
+    if len(symbols_tuple) > 1:
+        return df['Close']
     return df
 
 # --- 3. Main Application Logic ---
@@ -160,7 +173,7 @@ if tickers:
     try:
         all_symbols = list(set(tickers + [bench_symbol]))
         data = fetch_ticker_data(tuple(all_symbols), period)
-        daily_returns = data.ffill().pct_change().dropna()
+        daily_returns = data.ffill().pct_change(fill_method=None).dropna()
 
         tab_market, tab_details, tab_portfolio, tab_financials, tab_mc, tab_news = st.tabs([
             "📈 Market Overview", "🔍 Asset Details", "💼 Portfolio", "🧾 Financials", "🎲 Monte Carlo", "📰 News Feed"
@@ -561,3 +574,14 @@ if tickers:
         st.error(f"Waiting for valid data... Error: {e}")
 else:
     st.info("Select or enter tickers in the sidebar.")
+
+    # --- SIDEBAR HEALTH CHECK ---
+with st.sidebar:
+    st.divider()
+    try:
+        # A lightweight test call to check connectivity
+        test_data = yf.Ticker("AAPL").fast_info['lastPrice']
+        st.sidebar.markdown("● **API Status:** <span style='color:green'>Online</span>", unsafe_allow_html=True)
+    except Exception:
+        st.sidebar.markdown("● **API Status:** <span style='color:red'>Rate Limited</span>", unsafe_allow_html=True)
+        st.sidebar.warning("Yahoo is throttling this IP. Please wait 15-30 mins.")
