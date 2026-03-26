@@ -7,6 +7,11 @@ import plotly.express as px
 import xml.etree.ElementTree as ET
 import requests
 import requests_cache
+import time
+from datetime import datetime, timedelta
+
+# --- INSTALL REQUESTS CACHE FOR YFINANCE ---
+requests_cache.install_cache('yfinance_cache', backend='memory', expire_after=timedelta(hours=1))
 
 st.set_page_config(page_title="Pro Terminal", layout="wide")
 st.title("🏛️ Professional Equity Terminal")
@@ -148,25 +153,51 @@ FINANCIAL_TERMS = {
     "Free Cash Flow": "Cash generated after supporting operations and maintaining capital assets. \n\n*Healthy Range: High positive numbers indicate safety and room for dividends.*"
 }
 
-# --- NEW: Data Caching Function ---
+# --- NEW: Data Caching Function with Rate Limit Protection ---
 @st.cache_data(ttl=3600)  # High TTL is CRITICAL to stop hitting Yahoo
 def fetch_ticker_data(symbols_tuple, time_period):
+    """Fetch ticker data with exponential backoff retry logic"""
     try:
-        # yfinance 1.2.0+ handles the session automatically
-        df = yf.download(
-            tickers=list(symbols_tuple), 
-            period=time_period, 
-            progress=False,
-            group_by='column'
-        )
+        symbols_list = list(symbols_tuple)
+        max_retries = 3
+        retry_delay = 2  # seconds
         
-        if df.empty:
-            st.error("Yahoo returned no data. You might be rate-limited.")
-            return None
-            
-        return df['Close'] if len(symbols_tuple) > 1 else df
+        for attempt in range(max_retries):
+            try:
+                # yfinance 1.2.0+ handles the session automatically
+                df = yf.download(
+                    tickers=symbols_list, 
+                    period=time_period, 
+                    progress=False,
+                    group_by='column'
+                )
+                
+                if df.empty:
+                    st.warning("⏳ Yahoo returned no data. Retrying...")
+                    if attempt < max_retries - 1:
+                        time.sleep(retry_delay ** attempt)  # exponential backoff
+                        continue
+                    else:
+                        st.error("❌ Data unavailable after multiple retries. Try again in a few minutes.")
+                        return None
+                    
+                return df['Close'] if len(symbols_list) > 1 else df
+                
+            except Exception as inner_e:
+                if "Rate limited" in str(inner_e) or "Too Many Requests" in str(inner_e):
+                    if attempt < max_retries - 1:
+                        wait_time = retry_delay ** attempt
+                        st.warning(f"⏳ Rate limited. Retrying in {wait_time}s... (attempt {attempt + 1}/{max_retries})")
+                        time.sleep(wait_time)
+                        continue
+                    else:
+                        st.error(f"❌ Yahoo Finance rate limit exceeded. Please wait 15-30 minutes before refreshing. Error: {inner_e}")
+                        return None
+                else:
+                    raise inner_e
+                    
     except Exception as e:
-        st.error(f"Connection Error: {e}")
+        st.error(f"❌ Connection Error: {e}")
         return None
 
 # CRITICAL FIX for line 163 (The Pandas Warning)
@@ -582,10 +613,28 @@ else:
     # --- SIDEBAR HEALTH CHECK ---
 with st.sidebar:
     st.divider()
+    st.subheader("⚙️ System Status")
+    
+    cache_info = st.empty()
+    status_info = st.empty()
+    
     try:
         # A lightweight test call to check connectivity
         test_data = yf.Ticker("AAPL").fast_info['lastPrice']
-        st.sidebar.markdown("● **API Status:** <span style='color:green'>Online</span>", unsafe_allow_html=True)
-    except Exception:
-        st.sidebar.markdown("● **API Status:** <span style='color:red'>Rate Limited</span>", unsafe_allow_html=True)
-        st.sidebar.warning("Yahoo is throttling this IP. Please wait 15-30 mins.")
+        status_info.markdown("● **API Status:** <span style='color:green'>✓ Online</span>", unsafe_allow_html=True)
+        
+        # Show cache info
+        if requests_cache.get_cache():
+            cache_size = len(requests_cache.get_cache().responses)
+            cache_info.info(f"📦 **Cache:** {cache_size} entries (1-hour expiry)")
+        
+    except Exception as e:
+        status_info.markdown("● **API Status:** <span style='color:red'>⚠ Rate Limited</span>", unsafe_allow_html=True)
+        status_info.warning(
+            "🔄 **Yahoo Finance is throttling requests.**\n\n"
+            "✅ **What to do:**\n"
+            "• Wait 15-30 minutes and refresh\n"
+            "• App will use cached data if available\n"
+            "• Avoid rapidly refreshing the page\n\n"
+            "💡 **Why this happens:** Yahoo limits free API access to prevent abuse."
+        )
