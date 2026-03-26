@@ -149,24 +149,28 @@ FINANCIAL_TERMS = {
 }
 
 # --- NEW: Data Caching Function ---
-@st.cache_data(ttl=3600)
+@st.cache_data(ttl=3600)  # High TTL is CRITICAL to stop hitting Yahoo
 def fetch_ticker_data(symbols_tuple, time_period):
-    """
-    Fetch data allowing yf to manage its own curl_cffi session.
-    Using list(symbols_tuple) as yf.download expects a list or string.
-    """
-    # Simply call download without passing a manual session object
-    df = yf.download(
-        tickers=list(symbols_tuple), 
-        period=time_period, 
-        progress=False,
-        group_by='column'
-    )
-    
-    # Logic to handle MultiIndex columns vs Single Ticker Series
-    if len(symbols_tuple) > 1:
-        return df['Close']
-    return df
+    try:
+        # yfinance 1.2.0+ handles the session automatically
+        df = yf.download(
+            tickers=list(symbols_tuple), 
+            period=time_period, 
+            progress=False,
+            group_by='column'
+        )
+        
+        if df.empty:
+            st.error("Yahoo returned no data. You might be rate-limited.")
+            return None
+            
+        return df['Close'] if len(symbols_tuple) > 1 else df
+    except Exception as e:
+        st.error(f"Connection Error: {e}")
+        return None
+
+# CRITICAL FIX for line 163 (The Pandas Warning)
+# daily_returns = data.ffill().pct_change(fill_method=None).dropna()
 
 # --- 3. Main Application Logic ---
 if tickers:
