@@ -147,12 +147,20 @@ FINANCIAL_TERMS = {
     "Free Cash Flow": "Cash generated after supporting operations and maintaining capital assets. \n\n*Healthy Range: High positive numbers indicate safety and room for dividends.*"
 }
 
+# --- NEW: Data Caching Function ---
+@st.cache_data(ttl=3600)  # Keeps data in memory for 1 hour
+def fetch_ticker_data(symbols_tuple, time_period):
+    """Fetch data with caching to prevent YFRateLimitError."""
+    # Symbols must be a tuple for Streamlit's cache to 'hash' them
+    df = yf.download(list(symbols_tuple), period=time_period)['Close']
+    return df
+
 # --- 3. Main Application Logic ---
 if tickers:
     try:
         all_symbols = list(set(tickers + [bench_symbol]))
-        data = yf.download(all_symbols, period=period)['Close']
-        daily_returns = data.pct_change().dropna()
+        data = fetch_ticker_data(tuple(all_symbols), period)
+        daily_returns = data.ffill().pct_change().dropna()
 
         tab_market, tab_details, tab_portfolio, tab_financials, tab_mc, tab_news = st.tabs([
             "📈 Market Overview", "🔍 Asset Details", "💼 Portfolio", "🧾 Financials", "🎲 Monte Carlo", "📰 News Feed"
@@ -180,7 +188,7 @@ if tickers:
                     fig.add_trace(go.Scatter(x=data.index, y=y_val, name=label, line=line_style))
 
                 fig.update_layout(hovermode="x unified", template="plotly_dark", height=450)
-                st.plotly_chart(fig, use_container_width=True)
+                st.plotly_chart(fig, width="stretch")
 
                 st.divider()
                 
@@ -221,7 +229,7 @@ if tickers:
                     corr = daily_returns[tab1_tickers].corr()
                     fig_heat = px.imshow(corr, text_auto=".2f", color_continuous_scale='RdBu_r')
                     fig_heat.update_layout(height=400)
-                    st.plotly_chart(fig_heat, use_container_width=True)
+                    st.plotly_chart(fig_heat, width="stretch")
                 else:
                     st.info("Select at least 2 assets in the filter above to generate a correlation heatmap.")
 
@@ -445,7 +453,7 @@ if tickers:
                         pie_df = pd.DataFrame([{"Asset": d["Asset"], "Value": float(d["Total Value"].replace('$','').replace(',',''))} for d in port_data])
                         fig_pie = px.pie(pie_df, values='Value', names='Asset', hole=0.4, template="plotly_dark")
                         fig_pie.update_layout(margin=dict(t=0, b=0, l=0, r=0))
-                        st.plotly_chart(fig_pie, use_container_width=True)
+                        st.plotly_chart(fig_pie, width="stretch")
 
         # ==========================================
         # TAB 4: RAW FINANCIAL STATEMENTS
@@ -512,7 +520,7 @@ if tickers:
                         fig_mc.add_trace(go.Scatter(y=price_paths[:, i], mode='lines', line=dict(width=1, color='rgba(0, 150, 255, 0.1)'), showlegend=False))
                     
                     fig_mc.update_layout(title=f"{mc_ticker} - 100 Paths", yaxis_title="Price ($)", template="plotly_dark", height=500)
-                    st.plotly_chart(fig_mc, use_container_width=True)
+                    st.plotly_chart(fig_mc, width="stretch")
                     
                     final_prices = price_paths[-1]
                     c1, c2, c3 = st.columns(3)
